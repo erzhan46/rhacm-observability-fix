@@ -45,6 +45,12 @@ script_output () {
 #       1: Abnormal exit due to external error
 #       2: Abnormal exit due to script error
 function script_exit() {
+    if [[ -f ${CERT_FILE} ]]; then
+        rm -f ${CERT_FILE}
+    fi
+    if [[ -f ${KUBE_FILE} ]]; then
+        rm -f ${KUBE_FILE}
+    fi
     printf '%s\n' "$1"
     exit ${2:-0}
 }
@@ -121,6 +127,9 @@ function script_init() {
 
     MCM_CONTEXT=""
     MGD_CONTEXT=""
+
+    CERT_FILE=$(mktemp)
+    KUBE_FILE=$(mktemp)
 }
 
 # DESC: Parameter parser for fix option
@@ -315,7 +324,6 @@ function login_all() {
         script_exit "${c_output}" ${c_result}
     fi
     MCM_CONTEXT=$(ocp_get_context)
-echo $MCM_CONTEXT
 
     # Login to Managed Cluster
     if [[ ${MCM_API} == ${MGD_API} ]]; then
@@ -339,7 +347,6 @@ echo $MCM_CONTEXT
         fi
         MGD_CONTEXT=$(ocp_get_context)
     fi
-echo $MGD_CONTEXT
 }
 
 
@@ -355,7 +362,15 @@ function main() {
     
     # Log in to MCM Cluster
     login_all
-    #lock_init system
+    
+    # Restore mode
+    if [[ ${MODE} == "restore" ]]; then
+       restore_mco
+    fi
+
+    if [[ ${MODE} == "fix" ]]; then
+       fix_mco
+    fi
 }
 
 
