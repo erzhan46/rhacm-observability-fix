@@ -19,15 +19,22 @@ fi
 
 # Only enable these shell behaviours if we're not being sourced
 # Approach via: https://stackoverflow.com/a/28776166/8787985
-if ! (return 0 2> /dev/null); then
+#if ! (return 0 2> /dev/null); then
     # A better class of script...
-    set -o errexit      # Exit on most errors (see the manual)
-    set -o nounset      # Disallow expansion of unset variables
-    set -o pipefail     # Use last non-zero exit code in a pipeline
-fi
+#    set -o errexit      # Exit on most errors (see the manual)
+#    set -o nounset      # Disallow expansion of unset variables
+#    set -o pipefail     # Use last non-zero exit code in a pipeline
+#fi
 
 # Enable errtrace or the error trap handler will not work as expected
-set -o errtrace         # Ensure the error trap handler is inherited
+#set -o errtrace         # Ensure the error trap handler is inherited
+
+# DESC: Script output (currently just echo to stdout)
+# ARGS: $1 - Text for output
+# OUTS: None
+script_output () {
+    echo $1
+}
 
 # DESC: Exit script with the given message
 # ARGS: $1 (required): Message to print on exit
@@ -51,12 +58,18 @@ script_usage () {
 Fix parameters:
 	-m mcm_api		MCM Cluster API
 	-n mcm_ns		MCM Cluster namespace for endpoint-observability-work manifestwork for Managed cluster
-	-u mcm_user		MCM Cluster username
-	-p mcm_pwd		MCM Cluster password
+        Authentication:
+	   -u mcm_user		MCM Cluster username
+	   -p mcm_pwd		MCM Cluster password
+        Or:
+           -t mcm_token		MCM Cluster token
 	-c mgd_api		Managed Cluster API
 	-d mgd_ns		Managed Cluster namespace for observability addon (usually open-cluster-management-addon-observability)
-	-e mgd_user		Managed Cluster username
-	-f mgd_pass		Managed Cluster password
+        Authentication:
+	   -e mgd_user		Managed Cluster username
+	   -f mgd_pass		Managed Cluster password
+        Or:
+           -g mgd_token		Managed Cluster token
 EOF
   else
     cat << EOF
@@ -83,15 +96,31 @@ function script_init() {
     readonly script_name="$(basename "$script_path")"
     readonly script_params="$*"
 
+    oc_cmd=$(which oc 2>&1)
+    if [[ $? -ne 0 ]]; then
+        if [[ -x "/usr/bin/oc" ]]; then
+            oc_cmd="/usr/bin/oc"
+        elif [[ -x "/usr/local/bin/oc" ]]; then
+            oc_cmd="/usr/local/bin/oc"
+        else
+            script_exit "OCP command line utility (oc) ic not found. Install it before continuing" 1
+        fi
+    fi 
+
     MODE="undef"
     MCM_API=""
     MCM_NS=""
     MCM_USER=""
     MCM_PASS=""
+    MCM_TOKEN=""
     MGD_API=""
     MGD_NS="open-cluster-management-addon-observability"
     MGD_USER=""
     MGD_PASS=""
+    MGD_TOKEN=""
+
+    MCM_CONTEXT=""
+    MGD_CONTEXT=""
 }
 
 # DESC: Parameter parser for fix option
@@ -108,7 +137,7 @@ function parse_fix_params() {
                 script_exit "" 
                 ;;
             -m)
-	        MCM_UI="$1"
+	        MCM_API="$1"
 		shift
 		;;
             -n)
@@ -121,6 +150,10 @@ function parse_fix_params() {
 		;;
 	    -p)
 	        MCM_PASS="$1"
+		shift
+		;;
+	    -t)
+	        MCM_TOKEN="$1"
 		shift
 		;;
 	    -c)
@@ -139,46 +172,39 @@ function parse_fix_params() {
 	        MGD_PASS="$1"
 		shift
 		;;
+	    -g)
+	        MGD_TOKEN="$1"
+		shift
+		;;
             *)
                 script_exit "Invalid parameter was provided: $param" 1
                 ;;
         esac
     done
     if [[ -z ${MCM_API} ]]; then
+        script_usage
         script_exit "MCM Cluster API is not provided" 1
     fi
     if [[ -z ${MCM_NS} ]]; then
+        script_usage
         script_exit "MCM Cluster namespace for endpoint-observability-work manifestwork for Managed cluster is not provided" 1
     fi
-    if [[ -z ${MCM_USER} ]]; then
-        script_exit "MCM Cluster username is not provided" 1
-    fi
-    if [[ -z ${MCM_PASS} ]]; then
-        script_exit "MCM Cluster password is not provided" 1
+    if [[ -z ${MCM_TOKEN} ]] && [[ -z ${MCM_USER} || -z ${MCM_PASS} ]]; then
+        script_usage
+        script_exit "MCM Cluster authentication is not provided" 1
     fi
     if [[ -z ${MGD_API} ]]; then
+        script_usage
         script_exit "Managed Cluster API is not provided" 1
     fi
     if [[ -z ${MGD_NS} ]]; then
+        script_usage
         script_exit "Managed Cluster namespace for observability addon is not provided" 1
     fi
-    if [[ -z ${MGD_USER} ]]; then
-        script_exit "Managed Cluster username is not provided" 1
+    if [[ -z ${MGD_TOKEN} ]] && [[ -z ${MGD_USER} || -z ${MGD_PASS} ]]; then
+        script_usage
+        script_exit "Managed Cluster authentication is not provided" 1
     fi
-    if [[ -z ${MGD_PASS} ]]; then
-        script_exit "Managed Cluster password is not provided" 1
-    fi
-
-        -m mcm_api              MCM Cluster API
-        -n mcm_ns               MCM Cluster namespace for endpoint-observability-work manifestwork for Managed cluster
-        -u mcm_user             MCM Cluster username
-        -p mcm_pwd              MCM Cluster password
-        -c mgd_api              Managed Cluster API
-        -d mgd_ns               Managed Cluster namespace for observability addon (usually open-cluster-management-addon-observability)
-        -e mgd_user             Managed Cluster username
-        -f mgd_pass             Managed Cluster password
-
-
 }
 
 # DESC: Parameter parser
@@ -201,9 +227,11 @@ function parse_params() {
             fix)
                 MODE="fix"
                 parse_fix_params "$@"
+                break
                 ;;
             restore)
                 MODE="restore"
+                break
                 ;;
             *)
                 script_exit "Invalid parameter was provided: $param" 1
@@ -212,13 +240,121 @@ function parse_params() {
     done
 }
 
+# DESC: OCP Get Context
+# ARGS: None
+# OUTS: Context
+function ocp_get_context() {
+    local c_output=""
+    local c_result=0
+
+    c_output=$(${oc_cmd} config current-context 2>&1)
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Attempt to get current context from OCP kubeconfig failed: ${c_output}" ${c_result}
+    fi
+    echo ${c_output}
+}
+
+# DESC: OCP Set Context
+# ARGS: Context
+# OUTS: None
+function ocp_set_context() {
+    local c_contex=$1
+    local c_output=""
+    local c_result=0
+    
+    c_output=$(${oc_cmd} config use-context ${c_contex} 2>&1)
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Attempt to set current context(${c_contex}) failed: ${c_output}" ${c_result}
+    fi
+}
+
+
+# DESC: OCP Login
+# ARGS: $1 - Cluster API endpoint
+# $2 - Login token or username
+# $3 - Should not be provided if second parameter is token, otherwise - password
+# OUTS: None if successful, Error text otherwise
+# EXIT: 0 - success, 1 - error
+function ocp_login() {
+    local c_output=""
+    local c_result=0
+    
+    if [[ -z $3 ]]; then
+        c_output=$(${oc_cmd} login --token=$2 --server=$1 2>&1)
+    else
+        c_output=$(${oc_cmd} login --username=$2 --password=$3 --server=$1 2>&1)
+    fi
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        echo "Attempt to login to OCP Cluster failed: ${c_output}" 
+    fi
+    exit ${c_result}
+}
+
+# DESC: Login to all clusters
+# ARGS: None
+# OUTS: None
+function login_all() {
+    local c_output=""
+    local c_result=9
+
+    # Login to MCM cluster
+    if [[ -n ${MCM_TOKEN} ]]; then
+        script_output "Attempting to login to MCM cluster using token provided"
+        c_output=$(ocp_login ${MCM_API} ${MCM_TOKEN})
+        c_result=$?
+    fi
+    if [[ ${c_result} -ne 0 && -n ${MCM_USER} && -n ${MCM_USER} ]]; then
+        script_output "Attempting to login to MCM cluster using username and password provided"
+        c_output=$(ocp_login ${MCM_API} ${MCM_USER} ${MCM_PASS})
+        c_result=$?
+    fi
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "${c_output}" ${c_result}
+    fi
+    MCM_CONTEXT=$(ocp_get_context)
+echo $MCM_CONTEXT
+
+    # Login to Managed Cluster
+    if [[ ${MCM_API} == ${MGD_API} ]]; then
+        # All activities to be done on the same cluster - Reuse connection
+        script_output "Reusing MCM connection for Managed cluster activities"
+        MGD_CONTEXT=${MCM_CONTEXT}
+    else
+        c_result=9
+        if [[ -n ${MGD_TOKEN} ]]; then
+            script_output "Attempting to login to MGD cluster using token provided"
+            c_output=$(ocp_login ${MGD_API} ${MGD_TOKEN})
+            c_result=$?
+        fi
+        if [[ ${c_result} -ne 0 && -n ${MGD_USER} && -n ${MGD_USER} ]]; then
+            script_output "Attempting to login to MGD cluster using username and password provided"
+            c_output=$(ocp_login ${MGD_API} ${MGD_USER} ${MGD_PASS})
+            c_result=$?
+        fi
+        if [[ ${c_result} -ne 0 ]]; then
+            script_exit "${c_output}" ${c_result}
+        fi
+        MGD_CONTEXT=$(ocp_get_context)
+    fi
+echo $MGD_CONTEXT
+}
+
+
 # DESC: Main control flow
 # ARGS: $@ (optional): Arguments provided to the script
 # OUTS: None
 function main() {
+#    trap script_trap_err ERR
+#    trap script_trap_exit EXIT
 
     script_init "$@"
     parse_params "$@"
+    
+    # Log in to MCM Cluster
+    login_all
     #lock_init system
 }
 
