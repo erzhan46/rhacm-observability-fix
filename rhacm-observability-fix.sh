@@ -109,9 +109,21 @@ function script_init() {
         elif [[ -x "/usr/local/bin/oc" ]]; then
             oc_cmd="/usr/local/bin/oc"
         else
-            script_exit "OCP command line utility (oc) ic not found. Install it before continuing" 1
+            script_exit "OCP command line utility (oc) is not found. Install it before continuing" 1
         fi
     fi
+
+    openssl_cmd=$(which openssl 2>&1)
+    if [[ $? -ne 0 ]]; then
+        if [[ -x "/usr/bin/openssl" ]]; then
+            oc_cmd="/usr/bin/openssl"
+        elif [[ -x "/usr/local/bin/openssl" ]]; then
+            oc_cmd="/usr/local/bin/openssl"
+        else
+            script_exit "Openssl command line utility (openssl) is not found. Install it before continuing" 1
+        fi
+    fi
+
 
     MODE="undef"
     MCM_API=""
@@ -349,15 +361,15 @@ function login_all() {
     fi
 }
 
-# DESC: Login to all clusters
+# DESC: Restore MCO operation
 # ARGS: None
 # OUTS: None
-function login_all() {
+function restore_mco() {
     local c_output=""
     local c_result=9
 
     # Restore MCO processing
-    script_output "Attempting to login to MCM cluster using token provided"
+    script_output "Attempting to restore MCO operation on MCM cluster"
     ocp_set_context MCM_CONTEXT
     c_output=$(oc patch multiclusterobservability/observability --type=merge -p '{"metadata":{"annotations":{"mco-pause":"true"}}}')
     c_result=$?
@@ -365,6 +377,42 @@ function login_all() {
         script_exit "Failure: ${c_output}" ${c_result}
     fi
 }
+
+# DESC: Retrieve the MCM API endpoint certificate
+# ARGS: None
+# OUTS: None
+function get_cert() {
+    local c_output=""
+    local c_result=9
+
+    local c_api=$1
+    local c_host=${c_api#https://}
+    local c_name=${c_host%\:[0-9]*}
+
+    if [[ -z $c_host || -z $c_name ]]; then
+       script_exit "get_cert(): Error parsing api name: $1" 2
+    fi
+    
+    c_output=$(true | ${openssl_cmd} s_client -servername ${c_name} -connect ${c_name} 2>/dev/null | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p')
+    c_result=$?
+   
+    if [[ ${c_result} -ne 0
+}
+
+# DESC: Disable (pause) MCO operation and fix connectivity for a specific endpoint observer
+# ARGS: None
+# OUTS: None
+function fix_mco() {
+    local c_output=""
+    local c_result=9
+
+    # Restore MCO processing
+    script_output "Attempting to retrieve MCM API endpoint certificate"
+    get_cert ${MCM_API}
+
+}
+
+
 
 # DESC: Main control flow
 # ARGS: $@ (optional): Arguments provided to the script
@@ -387,6 +435,8 @@ function main() {
     if [[ ${MODE} == "fix" ]]; then
        fix_mco
     fi
+
+    script_exit "Command completed successfully" 0
 }
 
 
