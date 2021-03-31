@@ -79,7 +79,7 @@ Fix parameters:
 EOF
   else
     cat << EOF
-Usage: 
+Usage:
 	-h|--help		Displays this help
   	restore			Restore multiclusterobservability
 	fix			Enable observability fix
@@ -111,7 +111,7 @@ function script_init() {
         else
             script_exit "OCP command line utility (oc) ic not found. Install it before continuing" 1
         fi
-    fi 
+    fi
 
     MODE="undef"
     MCM_API=""
@@ -142,8 +142,8 @@ function parse_fix_params() {
         shift
         case $param in
             -h | --help)
-                script_usage 
-                script_exit "" 
+                script_usage
+                script_exit ""
                 ;;
             -m)
 	        MCM_API="$1"
@@ -231,7 +231,7 @@ function parse_params() {
         case $param in
             -h | --help)
                 script_usage
-                script_exit "" 
+                script_exit ""
                 ;;
             fix)
                 MODE="fix"
@@ -271,7 +271,7 @@ function ocp_set_context() {
     local c_contex=$1
     local c_output=""
     local c_result=0
-    
+
     c_output=$(${oc_cmd} config use-context ${c_contex} 2>&1)
     c_result=$?
     if [[ ${c_result} -ne 0 ]]; then
@@ -289,7 +289,7 @@ function ocp_set_context() {
 function ocp_login() {
     local c_output=""
     local c_result=0
-    
+
     if [[ -z $3 ]]; then
         c_output=$(${oc_cmd} login --token=$2 --server=$1 2>&1)
     else
@@ -297,7 +297,7 @@ function ocp_login() {
     fi
     c_result=$?
     if [[ ${c_result} -ne 0 ]]; then
-        echo "Attempt to login to OCP Cluster failed: ${c_output}" 
+        echo "Attempt to login to OCP Cluster failed: ${c_output}"
     fi
     exit ${c_result}
 }
@@ -349,6 +349,22 @@ function login_all() {
     fi
 }
 
+# DESC: Login to all clusters
+# ARGS: None
+# OUTS: None
+function login_all() {
+    local c_output=""
+    local c_result=9
+
+    # Restore MCO processing
+    script_output "Attempting to login to MCM cluster using token provided"
+    ocp_set_context MCM_CONTEXT
+    c_output=$(oc patch multiclusterobservability/observability --type=merge -p '{"metadata":{"annotations":{"mco-pause":"true"}}}')
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failure: ${c_output}" ${c_result}
+    fi
+}
 
 # DESC: Main control flow
 # ARGS: $@ (optional): Arguments provided to the script
@@ -359,10 +375,10 @@ function main() {
 
     script_init "$@"
     parse_params "$@"
-    
+
     # Log in to MCM Cluster
     login_all
-    
+
     # Restore mode
     if [[ ${MODE} == "restore" ]]; then
        restore_mco
