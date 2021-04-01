@@ -361,6 +361,7 @@ function login_all() {
     fi
 }
 
+
 # DESC: Restore MCO operation
 # ARGS: None
 # OUTS: None
@@ -392,10 +393,10 @@ function get_cert() {
     if [[ -z $c_host || -z $c_name ]]; then
        script_exit "get_cert(): Error parsing api name: $1" 2
     fi
-    
+
     c_output=$(true | ${openssl_cmd} s_client -servername ${c_name} -connect ${c_name} 2>/dev/null | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p')
     c_result=$?
-   
+
     if [[ ${c_result} -ne 0
 }
 
