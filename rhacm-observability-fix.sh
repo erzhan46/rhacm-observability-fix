@@ -51,6 +51,9 @@ function script_exit() {
     if [[ -f ${KUBE_FILE} ]]; then
         rm -f ${KUBE_FILE}
     fi
+    if [[ -f ${MFO_FILE} ]]; then
+        rm -f ${MFO_FILE}
+    fi
     printf '%s\n' "$1"
     exit ${2:-0}
 }
@@ -76,6 +79,17 @@ Fix parameters:
 	   -f mgd_pass		Managed Cluster password
         Or:
            -g mgd_token		Managed Cluster token
+EOF
+  elif [[ ${MODE} == "restore" ]]; then
+    cat << EOF
+Restore parameters:
+        -m mcm_api              MCM Cluster API
+        -n mcm_ns               MCM Cluster namespace for endpoint-observability-work manifestwork for Managed cluster
+        Authentication:
+           -u mcm_user          MCM Cluster username
+           -p mcm_pwd           MCM Cluster password
+        Or:
+           -t mcm_token         MCM Cluster token
 EOF
   else
     cat << EOF
@@ -142,12 +156,13 @@ function script_init() {
 
     CERT_FILE=$(mktemp)
     KUBE_FILE=$(mktemp)
+    MFO_FILE=$(mktemp)
 }
 
-# DESC: Parameter parser for fix option
+# DESC: Parameter parser 
 # ARGS: $@ (optional): Arguments provided to the script
 # OUTS: Variables indicating command-line parameters and options
-function parse_fix_params() {
+function parse_common_params() {
     local param
     while [[ $# -gt 0 ]]; do
         param="$1"
@@ -202,6 +217,15 @@ function parse_fix_params() {
                 ;;
         esac
     done
+}
+
+# DESC: Parameter parser for fix option
+# ARGS: $@ (optional): Arguments provided to the script
+# OUTS: Variables indicating command-line parameters and options
+function parse_fix_params() {
+
+    parse_common_params "$@"
+
     if [[ -z ${MCM_API} ]]; then
         script_usage
         script_exit "MCM Cluster API is not provided" 1
@@ -225,6 +249,27 @@ function parse_fix_params() {
     if [[ -z ${MGD_TOKEN} ]] && [[ -z ${MGD_USER} || -z ${MGD_PASS} ]]; then
         script_usage
         script_exit "Managed Cluster authentication is not provided" 1
+    fi
+}
+
+# DESC: Parameter parser for restore option
+# ARGS: $@ (optional): Arguments provided to the script
+# OUTS: Variables indicating command-line parameters and options
+function parse_restore_params() {
+
+    parse_common_params "$@"
+
+    if [[ -z ${MCM_API} ]]; then
+        script_usage
+        script_exit "MCM Cluster API is not provided" 1
+    fi
+    if [[ -z ${MCM_NS} ]]; then
+        script_usage
+        script_exit "MCM Cluster namespace for endpoint-observability-work manifestwork for Managed cluster is not provided" 1
+    fi
+    if [[ -z ${MCM_TOKEN} ]] && [[ -z ${MCM_USER} || -z ${MCM_PASS} ]]; then
+        script_usage
+        script_exit "MCM Cluster authentication is not provided" 1
     fi
 }
 
@@ -252,6 +297,7 @@ function parse_params() {
                 ;;
             restore)
                 MODE="restore"
+                parse_restore_params "$@"
                 break
                 ;;
             *)
@@ -361,22 +407,41 @@ function login_all() {
     fi
 }
 
+# DESC: Pause MCO operation
+# ARGS: None
+# OUTS: None
+function pause_mco() {
+    local c_output=""
+    local c_result=9
+
+    if [[ -z $1 ]]; then
+        script_exit "pause_mco(): argument is not provided" 2
+    fi
+
+    # Pause/unpause MCO processing
+    ocp_set_context ${MCM_CONTEXT}
+    if [[ $1 == "true" ]]; then
+        c_output=$(${oc_cmd} patch multiclusterobservability/observability --type=merge -p '{"metadata":{"annotations":{"mco-pause":"true"}}}')
+    elif [[ $1 == "false" ]]; then
+        c_output=$(${oc_cmd} patch multiclusterobservability/observability --type=merge -p '{"metadata":{"annotations":{"mco-pause":"false"}}}')
+    else
+        script_exit "pause_mco(): Incorrect argument is not provided: $1" 2
+    fi
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failure: ${c_output}" ${c_result}
+    fi
+}
+
 
 # DESC: Restore MCO operation
 # ARGS: None
 # OUTS: None
 function restore_mco() {
-    local c_output=""
-    local c_result=9
 
     # Restore MCO processing
     script_output "Attempting to restore MCO operation on MCM cluster"
-    ocp_set_context MCM_CONTEXT
-    c_output=$(oc patch multiclusterobservability/observability --type=merge -p '{"metadata":{"annotations":{"mco-pause":"true"}}}')
-    c_result=$?
-    if [[ ${c_result} -ne 0 ]]; then
-        script_exit "Failure: ${c_output}" ${c_result}
-    fi
+    pause_mco false
 }
 
 # DESC: Retrieve the MCM API endpoint certificate
@@ -385,20 +450,62 @@ function restore_mco() {
 function get_cert() {
     local c_output=""
     local c_result=9
+    local c_cert=""
 
     local c_api=$1
     local c_host=${c_api#https://}
     local c_name=${c_host%\:[0-9]*}
 
     if [[ -z $c_host || -z $c_name ]]; then
-       script_exit "get_cert(): Error parsing api name: $1" 2
+        script_exit "get_cert(): Error parsing api name: $1" 2
     fi
 
-    c_output=$(true | ${openssl_cmd} s_client -servername ${c_name} -connect ${c_name} 2>/dev/null | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p')
+    c_output=$(true | ${openssl_cmd} s_client -servername ${c_name} -connect ${c_host} >${CERT_FILE} 2>&1)
     c_result=$?
 
-    if [[ ${c_result} -ne 0
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "get_cert(): Openssl failed to retrieve the data: ${c_output}" ${c_result}
+    fi 
+
+    sed -i -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' ${CERT_FILE}
+    c_cert=$(cat ${CERT_FILE})
+
+    if [[ -z ${c_cert} ]]; then
+        script_exit "get_cert(): Failed to parse the data: ${c_output}" 2
+    fi 
 }
+
+# DESC: Patch manifestwork
+# ARGS: None
+# OUTS: None
+function patch_mfo() {
+    local c_output=""
+    local c_result=9
+    local c_cert=""
+
+    local c_api=$1
+    local c_host=${c_api#https://}
+    local c_name=${c_host%\:[0-9]*}
+
+    if [[ -z $c_host || -z $c_name ]]; then
+        script_exit "get_cert(): Error parsing api name: $1" 2
+    fi
+
+    c_output=$(true | ${openssl_cmd} s_client -servername ${c_name} -connect ${c_host} >${CERT_FILE} 2>&1)
+    c_result=$?
+
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "get_cert(): Openssl failed to retrieve the data: ${c_output}" ${c_result}
+    fi
+
+    sed -i -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' ${CERT_FILE}
+    c_cert=$(cat ${CERT_FILE})
+
+    if [[ -z ${c_cert} ]]; then
+        script_exit "get_cert(): Failed to parse the data: ${c_output}" 2
+    fi
+}
+
 
 # DESC: Disable (pause) MCO operation and fix connectivity for a specific endpoint observer
 # ARGS: None
@@ -410,6 +517,14 @@ function fix_mco() {
     # Restore MCO processing
     script_output "Attempting to retrieve MCM API endpoint certificate"
     get_cert ${MCM_API}
+
+    # Pause MCO processing
+    script_output "Attempting to pause MCO operation on MCM cluster"
+    pause_mco true
+
+    # Patch manifestwork
+    script_output "Attempting to patch manifestwork on MCM cluster"
+    patch_mfo
 
 }
 
