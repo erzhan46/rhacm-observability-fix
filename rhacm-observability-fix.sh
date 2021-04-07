@@ -54,6 +54,12 @@ function script_exit() {
     if [[ -f ${MFO_FILE} ]]; then
         rm -f ${MFO_FILE}
     fi
+    if [[ -f ${CA_FILE} ]]; then
+        rm -f ${CA_FILE}
+    fi
+    if [[ -f ${ENC_FILE} ]]; then
+        rm -f ${ENC_FILE}
+    fi
     printf '%s\n' "$1"
     exit ${2:-0}
 }
@@ -157,6 +163,8 @@ function script_init() {
     CERT_FILE=$(mktemp)
     KUBE_FILE=$(mktemp)
     MFO_FILE=$(mktemp)
+    CA_FILE=$(mktemp)
+    ENC_FILE=$(mktemp)
 }
 
 # DESC: Parameter parser 
@@ -481,29 +489,56 @@ function get_cert() {
 function patch_mfo() {
     local c_output=""
     local c_result=9
-    local c_cert=""
 
-    local c_api=$1
-    local c_host=${c_api#https://}
-    local c_name=${c_host%\:[0-9]*}
+    # Get mfo
+    ocp_set_context ${MCM_CONTEXT}
 
-    if [[ -z $c_host || -z $c_name ]]; then
-        script_exit "get_cert(): Error parsing api name: $1" 2
-    fi
-
-    c_output=$(true | ${openssl_cmd} s_client -servername ${c_name} -connect ${c_host} >${CERT_FILE} 2>&1)
+    c_output=$(${oc_cmd} project ${MCM_NS})
     c_result=$?
-
     if [[ ${c_result} -ne 0 ]]; then
-        script_exit "get_cert(): Openssl failed to retrieve the data: ${c_output}" ${c_result}
+        script_exit "Failure: ${c_output}" ${c_result}
     fi
 
-    sed -i -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' ${CERT_FILE}
-    c_cert=$(cat ${CERT_FILE})
-
-    if [[ -z ${c_cert} ]]; then
-        script_exit "get_cert(): Failed to parse the data: ${c_output}" 2
+    ${oc_cmd} get manifestwork endpoint-observability-work -o yaml >${MFO_FILE}
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failed to retrive mfo " ${c_result}
     fi
+
+    grep 'kubeconfig:' ${MFO_FILE} | awk  '{print $2}' | base64 -d > ${KUBE_FILE}
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failed to retrive kubeconfig " ${c_result}
+    fi
+
+cat ${KUBE_FILE}
+
+echo "YOB"
+
+    grep 'certificate-authority-data:' ${KUBE_FILE} | awk  '{print $2}' | base64 -d > ${CA_FILE}
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failed to retrive kubeconfig " ${c_result}
+    fi
+
+    cat ${CERT_FILE} >> ${CA_FILE}
+
+    echo -n "    certificate-authority-data: " > ${ENC_FILE}
+    cat ${CA_FILE} | base64 -w0 >> ${ENC_FILE}
+    echo "" >> ${ENC_FILE}
+
+    sed -e '/certificate-authority-data:/ {' -e "r ${ENC_FILE}" -e 'd' -e '}' -i ${KUBE_FILE}
+
+    echo -n "        kubeconfig: " > ${ENC_FILE}
+    cat ${KUBE_FILE} | base64 -w0 >> ${ENC_FILE}
+    echo "" >> ${ENC_FILE}
+
+cat ${ENC_FILE}
+
+echo "YOB"
+ 
+    cat ${MFO_FILE} | sed -e '/kubeconfig:/ {' -e "r ${ENC_FILE}" -e 'd' -e '}'
+    
 }
 
 
@@ -519,8 +554,8 @@ function fix_mco() {
     get_cert ${MCM_API}
 
     # Pause MCO processing
-    script_output "Attempting to pause MCO operation on MCM cluster"
-    pause_mco true
+#    script_output "Attempting to pause MCO operation on MCM cluster"
+#    pause_mco true
 
     # Patch manifestwork
     script_output "Attempting to patch manifestwork on MCM cluster"
