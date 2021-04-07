@@ -504,41 +504,122 @@ function patch_mfo() {
     if [[ ${c_result} -ne 0 ]]; then
         script_exit "Failed to retrive mfo " ${c_result}
     fi
+cp ${MFO_FILE} ./mfo1.yaml
 
+    # Retrieve kubeconfig
     grep 'kubeconfig:' ${MFO_FILE} | awk  '{print $2}' | base64 -d > ${KUBE_FILE}
     c_result=$?
     if [[ ${c_result} -ne 0 ]]; then
         script_exit "Failed to retrive kubeconfig " ${c_result}
     fi
 
-cat ${KUBE_FILE}
-
-echo "YOB"
-
+    # Retrieve certificate data
     grep 'certificate-authority-data:' ${KUBE_FILE} | awk  '{print $2}' | base64 -d > ${CA_FILE}
     c_result=$?
     if [[ ${c_result} -ne 0 ]]; then
         script_exit "Failed to retrive kubeconfig " ${c_result}
     fi
 
+    # Add certificate to certificate chain
     cat ${CERT_FILE} >> ${CA_FILE}
 
+    # Replace certificate data with new set
     echo -n "    certificate-authority-data: " > ${ENC_FILE}
     cat ${CA_FILE} | base64 -w0 >> ${ENC_FILE}
     echo "" >> ${ENC_FILE}
 
     sed -e '/certificate-authority-data:/ {' -e "r ${ENC_FILE}" -e 'd' -e '}' -i ${KUBE_FILE}
 
+    # Replace kubeconfig data with new one
     echo -n "        kubeconfig: " > ${ENC_FILE}
     cat ${KUBE_FILE} | base64 -w0 >> ${ENC_FILE}
     echo "" >> ${ENC_FILE}
 
-cat ${ENC_FILE}
+    sed -e '/kubeconfig:/ {' -e "r ${ENC_FILE}" -e 'd' -e '}' -i ${MFO_FILE}
 
-echo "YOB"
- 
-    cat ${MFO_FILE} | sed -e '/kubeconfig:/ {' -e "r ${ENC_FILE}" -e 'd' -e '}'
+cp ${MFO_FILE} ./mfo2.yaml
+
+    # Apply changes to mfo
+    c_output=$(${oc_cmd} replace -f ${MFO_FILE} 2>&1)
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failure: ${c_output}" ${c_result}
+    fi
     
+}
+
+# DESC: Delete hub-kube-config on managed cluster to let applied manifest work to recreate it
+# ARGS: None
+# OUTS: None
+function delete_secret() {
+    local c_output=""
+    local c_result=9
+
+    ocp_set_context ${MGD_CONTEXT}
+
+    c_output=$(${oc_cmd} project ${MGD_NS})
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failure: ${c_output}" ${c_result}
+    fi
+
+    c_output=$(${oc_cmd} delete secret hub-kube-config 2>&1) 
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failed to delete secret " ${c_result}
+    fi
+}
+
+# DESC: Restart observability pod on managed cluster
+# ARGS: None
+# OUTS: None
+function restart_pods() {
+    local c_output=""
+    local c_result=9
+
+    ocp_set_context ${MGD_CONTEXT}
+
+    c_output=$(${oc_cmd} project ${MGD_NS})
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failure: ${c_output}" ${c_result}
+    fi
+
+    # Get pods name
+    c_output=$(${oc_cmd} get pods | grep 'endpoint-observability-operator' | awk '{print $1;}')
+    c_result=$?
+    if [[ ${c_result} -ne 0 || -z ${c_output} ]]; then
+        script_exit "Failed to find pod ${c_output} " ${c_result}
+    fi
+
+    local c_pod=${c_output}
+
+    # Delete pod
+    c_output=$(${oc_cmd} delete pod ${c_pod} 2>&1)
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failed to find pod ${c_output} " ${c_result}
+    fi
+
+}
+
+# DESC: Check status of observability pod on managed cluster
+# ARGS: None
+# OUTS: None
+function check_pods() {
+    local c_output=""
+    local c_result=9
+
+    ocp_set_context ${MGD_CONTEXT}
+
+    c_output=$(${oc_cmd} project ${MGD_NS})
+    c_result=$?
+    if [[ ${c_result} -ne 0 ]]; then
+        script_exit "Failure: ${c_output}" ${c_result}
+    fi
+
+    # Get pods name
+    ${oc_cmd} get pods | grep 'endpoint-observability-operator' 
 }
 
 
@@ -554,12 +635,32 @@ function fix_mco() {
     get_cert ${MCM_API}
 
     # Pause MCO processing
-#    script_output "Attempting to pause MCO operation on MCM cluster"
-#    pause_mco true
+    script_output "Attempting to pause MCO operation on MCM cluster"
+    pause_mco true
+    script_output "Sleep for 30 seconds"
+    sleep 30
 
     # Patch manifestwork
     script_output "Attempting to patch manifestwork on MCM cluster"
     patch_mfo
+    script_output "Sleep for 30 seconds"
+    sleep 30
+
+    # Delete secret
+    script_output "Attempting to delete secret on managed cluster"
+    delete_secret
+    script_output "Sleep for 30 seconds"
+    sleep 30
+
+    # Restart observability pods
+    script_output "Attempting to restart observability pods on managed cluster"
+    restart_pods
+    script_output "Sleep for 30 seconds"
+    sleep 30
+
+    # Check observability pods
+    script_output "Check observability pods on managed cluster"
+    check_pods
 
 }
 
